@@ -83,6 +83,18 @@ def gemini_model() -> str:
     return env("GEMINI_MODEL", default="gemini-3.8-flash")
 
 
+def gemini_fallback_models() -> List[str]:
+    """Models to try when the primary one is overloaded, in order.
+
+    Setting the variable to an empty string disables fallbacks entirely; only an
+    unset variable gets the default chain.
+    """
+    raw = os.getenv("GEMINI_FALLBACK_MODELS")
+    if raw is None:
+        raw = "gemini-3.6-flash,gemini-2.5-flash"
+    return [name.strip() for name in raw.split(",") if name.strip()]
+
+
 def supabase_url() -> str:
     return env("SUPABASE_URL")
 
@@ -111,6 +123,7 @@ __all__ = [
     "FEATURE_KEYS",
     "DOTENV_LOADED",
     "gemini_model",
+    "gemini_fallback_models",
     "gemini_key",
     "supabase_url",
     "supabase_key",

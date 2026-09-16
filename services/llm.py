@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import re
 import time
 from typing import Any, Callable, Dict, List, Optional, TypeVar
@@ -29,8 +30,9 @@ logger = logging.getLogger(__name__)
 Client = genai.Client
 
 DEFAULT_MODEL = config.gemini_model()
-MAX_RETRIES = 3
+MAX_RETRIES = 4
 RETRY_BASE_DELAY = 1.5
+RETRY_MAX_DELAY = 8.0
 
 T = TypeVar("T")
 
@@ -41,6 +43,10 @@ class LLMError(Exception):
 
 class LLMConfigurationError(LLMError):
     """The API key or model configuration is missing/invalid."""
+
+
+class ModelOverloadedError(LLMError):
+    """The model is at capacity upstream — worth retrying or falling back."""
 
 
 # --------------------------------------------------------------------------- #
@@ -128,11 +134,65 @@ def _with_retries(send: Callable[[], T], model: str, max_retries: int) -> T:
                 raise LLMError(f"Unexpected error calling the model: {exc}") from exc
 
         if attempt < max_retries:
-            time.sleep(RETRY_BASE_DELAY * (2 ** (attempt - 1)))
+            # Exponential backoff with jitter: a capacity spike is usually
+            # shared, so retrying in lockstep with everyone else does not help.
+            delay = min(RETRY_BASE_DELAY * (2 ** (attempt - 1)), RETRY_MAX_DELAY)
+            time.sleep(delay * (0.7 + 0.6 * random.random()))
 
-    raise LLMError(
-        f"Gemini was unreachable after {max_retries} attempts: {last_error}"
+    raise ModelOverloadedError(
+        f"'{model}' did not respond after {max_retries} attempts. "
+        f"Last error: {last_error}"
     )
+
+
+def _model_chain(model: str) -> List[str]:
+    """The primary model followed by any configured fallbacks."""
+    chain = [model]
+    for name in config.gemini_fallback_models():
+        if name and name not in chain:
+            chain.append(name)
+    return chain
+
+
+def _run_with_fallback(
+    make_send: Callable[[str], Callable[[], T]],
+    model: str,
+    max_retries: int,
+) -> T:
+    """Try ``model``, then each fallback, when the model is overloaded.
+
+    A 503 from Gemini means that specific model is at capacity, not that the
+    request is wrong — so the same call is retried against a less busy model
+    before giving up.
+    """
+    chain = _model_chain(model)
+    tried: List[str] = []
+    last: Optional[Exception] = None
+
+    for candidate in chain:
+        try:
+            return _with_retries(make_send(candidate), candidate, max_retries)
+        except ModelOverloadedError as exc:
+            last = exc
+            tried.append(candidate)
+            if candidate != chain[-1]:
+                logger.warning(
+                    "%s is overloaded; falling back to the next model", candidate
+                )
+        except LLMConfigurationError as exc:
+            # A model this key cannot use is worth skipping, but a bad key is not.
+            if "not available to this key" not in str(exc) or candidate == chain[-1]:
+                raise
+            last = exc
+            tried.append(candidate)
+
+    raise ModelOverloadedError(
+        "Gemini is busy right now — "
+        + ", ".join(tried)
+        + " all returned no result. This is capacity on Google's side, not a "
+        "problem with your key or your input. Wait a moment and run it again, "
+        "or set GEMINI_MODEL to a different model."
+    ) from last
 
 
 # --------------------------------------------------------------------------- #
@@ -218,20 +278,23 @@ def call_tool(
     if tool.get("description"):
         instruction += f"\n\nOutput contract ({name}): {tool['description']}"
 
-    def send() -> Dict[str, Any]:
-        response = client.models.generate_content(
-            model=model,
-            contents=user_message,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=instruction,
-                max_output_tokens=max_tokens,
-                response_mime_type="application/json",
-                response_schema=response_schema,
-            ),
-        )
-        return _parse_json_response(response, name)
+    def make_send(candidate: str) -> Callable[[], Dict[str, Any]]:
+        def send() -> Dict[str, Any]:
+            response = client.models.generate_content(
+                model=candidate,
+                contents=user_message,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=instruction,
+                    max_output_tokens=max_tokens,
+                    response_mime_type="application/json",
+                    response_schema=response_schema,
+                ),
+            )
+            return _parse_json_response(response, name)
 
-    return _with_retries(send, model, max_retries)
+        return send
+
+    return _run_with_fallback(make_send, model, max_retries)
 
 
 def _finish_reason(response: Any) -> str:
@@ -321,28 +384,31 @@ def call_text(
     if not contents:
         raise LLMError("There is nothing to send to the model.")
 
-    def send() -> str:
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=system,
-                max_output_tokens=max_tokens,
-            ),
-        )
-        reason = _finish_reason(response).upper()
-        if "SAFETY" in reason or "BLOCK" in reason or "PROHIBITED" in reason:
-            raise LLMError(
-                f"Gemini blocked the response ({reason}). Rephrase and try again."
+    def make_send(candidate: str) -> Callable[[], str]:
+        def send() -> str:
+            response = client.models.generate_content(
+                model=candidate,
+                contents=contents,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=system,
+                    max_output_tokens=max_tokens,
+                ),
             )
-        text = _response_text(response)
-        if not text:
-            raise LLMError("The model returned an empty reply. Try again.")
-        if "MAX_TOKENS" in reason:
-            text += "\n\n_(Answer cut off — ask a narrower question.)_"
-        return text
+            reason = _finish_reason(response).upper()
+            if "SAFETY" in reason or "BLOCK" in reason or "PROHIBITED" in reason:
+                raise LLMError(
+                    f"Gemini blocked the response ({reason}). Rephrase and try again."
+                )
+            text = _response_text(response)
+            if not text:
+                raise LLMError("The model returned an empty reply. Try again.")
+            if "MAX_TOKENS" in reason:
+                text += "\n\n_(Answer cut off — ask a narrower question.)_"
+            return text
 
-    return _with_retries(send, model, max_retries)
+        return send
+
+    return _run_with_fallback(make_send, model, max_retries)
 
 
 # --------------------------------------------------------------------------- #
@@ -376,6 +442,7 @@ __all__ = [
     "limit_sentences",
     "LLMError",
     "LLMConfigurationError",
+    "ModelOverloadedError",
     "DEFAULT_MODEL",
     "MAX_RETRIES",
     "RETRY_BASE_DELAY",

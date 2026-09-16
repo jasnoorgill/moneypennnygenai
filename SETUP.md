@@ -128,3 +128,19 @@ The sidebar shows which services are still unconfigured. When it reads
 
 Editor and Q&A work with just `GEMINI_API_KEY` — good for a first smoke test
 before the database is set up.
+
+## If you see "Gemini is busy right now"
+
+That is a 503 from Google: the model is at capacity, not a problem with your key
+or your input. The app already retries four times with backoff and then tries
+`GEMINI_FALLBACK_MODELS` in order, so you only see this message when every model
+in the chain is busy. Wait a minute and run it again.
+
+If the newest model is busy often, make a steadier one the default:
+
+```
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+`gemini-2.5-flash` is older and less in demand, and it is more than capable for
+everything Moneypenny asks of it.
