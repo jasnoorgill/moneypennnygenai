@@ -8,7 +8,9 @@ Moneypenny is a reusable Streamlit application for VC fundraising. It uses an MV
 - `ui/` — Streamlit views. No API calls, no SQL, no `os.getenv`.
   - `match_view.py` (Match) · `editor_view.py` (Editor) · `briefing_view.py` (Briefing) · `qa_view.py` (Q&A)
 - `services/` — business logic and external API calls.
-  - `llm.py` — shared Gemini plumbing: client, retry/backoff, JSON-schema calls, plain-text calls.
+  - `llm.py` — shared model plumbing: client, retry/backoff, JSON-schema calls,
+    plain-text calls. Dispatches between Gemini and MiniMax based on `LLM_PROVIDER`;
+    the rest of the codebase is provider-agnostic.
   - `investor_matcher.py` — rank investors against a startup profile.
   - `pitch_editor.py` — critique and rewrite a pitch script.
   - `briefing_service.py` — Tavily research → Gemini briefing → Supabase cache.

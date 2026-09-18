@@ -29,6 +29,13 @@ from the dashboard. The free tier is 1,000 credits/month; this app uses 3
 advanced searches per fresh briefing, so 2 credits each = 6 credits per
 briefing, and cached briefings cost nothing.
 
+**MiniMax** (optional, alternative to Gemini) — https://www.minimax.io →
+sign in → API Keys → create a key. Outside mainland China the app talks to
+MiniMax's Anthropic-compatible Messages API at
+`https://api.minimax.io/anthropic/v1/messages` (mainland China accounts use
+`api.minimaxi.com` instead — set `MINIMAX_BASE_URL` to override). Set
+`LLM_PROVIDER=minimax` to use it instead of Gemini.
+
 ## 3. Add them to a .env
 
 Create a `.env` file in the repo root (same folder as `app.py`). It is
@@ -40,6 +47,7 @@ SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_KEY=your-service-role-key
 GEMINI_API_KEY=AIza...
 TAVILY_API_KEY=tvly-...
+MINIMAX_API_KEY=your-minimax-key
 KEYS
 ```
 
